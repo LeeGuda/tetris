@@ -180,10 +180,10 @@ class TetrisEnv:
         
         # 1. 줄 제거 보상 (기하급수적)
         if lines_cleared == 0: reward_lines = 0.0
-        elif lines_cleared == 1: reward_lines = 1.0
-        elif lines_cleared == 2: reward_lines = 3.0
-        elif lines_cleared == 3: reward_lines = 6.0
-        elif lines_cleared == 4: reward_lines = 10.0 # Tetris!
+        elif lines_cleared == 1: reward_lines = 10.0 # 기존 1.0 -> 10.0
+        elif lines_cleared == 2: reward_lines = 30.0 # 기존 3.0 -> 30.0
+        elif lines_cleared == 3: reward_lines = 60.0 # 기존 6.0 -> 60.0
+        elif lines_cleared == 4: reward_lines = 100.0 # 기존 10.0 -> 100.0 (Tetris!)
         else: reward_lines = 0.0
 
         # 2. 상태 변화량 계산
