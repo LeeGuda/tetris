@@ -39,7 +39,7 @@ TETROMINOS = [
     [[[0, 5, 5], [5, 5, 0]], [[5, 0], [5, 5], [0, 5]]],
     # 5: T (값 6)
     [[[0, 6, 0], [6, 6, 6]], [[6, 0], [6, 6], [6, 0]], [[6, 6, 6], [0, 6, 0]], [[0, 6], [6, 6], [0, 6]]],
-    # 6: Z (값 7 -> 6으로 수정) 👈 🚨 버그 수정
+    # 6: Z (값 7 -> 6으로 수정) 
     [[[6, 6, 0], [0, 6, 6]], [[0, 6], [6, 6], [6, 0]]] 
 ]
 
@@ -92,13 +92,20 @@ def clear_lines(board):
         
     return lines_cleared, new_board
 
+# ------------------------- 🚨 수정된 lock_block 함수 -------------------------
 def lock_block(board, block): 
-    """블록을 보드에 고정합니다."""
+    """블록을 보드에 고정합니다. (음수 인덱스 랩어라운드 버그 수정)"""
     for row_idx, row in enumerate(block.shape):
         for col_idx, cell in enumerate(row):
             if cell != 0:
-                # 색상 인덱스(0-6) + 1을 하여 보드에 저장 (0은 빈 공간)
-                board[block.y + row_idx][block.x + col_idx] = block.shape_index + 1
+                board_y = block.y + row_idx
+                board_x = block.x + col_idx
+                
+                # [수정] Y좌표가 0보다 작으면(화면 밖) 무시하고, 화면 안(0 <= Y < BOARD_HEIGHT)일 때만 고정
+                if 0 <= board_y < BOARD_HEIGHT and 0 <= board_x < BOARD_WIDTH: 
+                    # 색상 인덱스(0-6) + 1을 하여 보드에 저장 (0은 빈 공간)
+                    board[board_y][board_x] = block.shape_index + 1
+# -----------------------------------------------------------------------------
 
 
 # --- 4. CurrentBlock 클래스 (TetrisEnv에서 임포트함) ---
@@ -117,11 +124,8 @@ class CurrentBlock:
         self.x = (BOARD_WIDTH // 2) - (block_width // 2)
         
         # 💡 수정: 시작 Y 좌표를 보드 상단 바깥 (Y=-2 또는 -3)으로 설정
-        # 이렇게 하면 충돌 로직이 안정화될 여지가 생깁니다.
         self.y = -2 
         
-        # ⚠️ 경고: Y=-2는 블록이 상단 2줄 위에서 시작함을 의미합니다.
-
     def rotate_to(self, new_rotation):
         """AI의 행동(action)에 따라 블록의 회전 상태를 즉시 설정합니다."""
         max_rotations = len(TETROMINOS[self.shape_index])
@@ -146,6 +150,10 @@ class CurrentBlock:
 
 def draw_block(surface, color, x, y, outline_only=False):
     """단일 미니 블록을 그립니다."""
+    # Y가 0 미만인 블록은 화면에 그리지 않습니다.
+    if y < 0:
+        return
+        
     rect = (x * SQUARE_SIZE, y * SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE)
     if outline_only:
         pygame.draw.rect(surface, color, rect, 1)
