@@ -10,18 +10,20 @@ from TetrisEnv import TetrisEnv
 
 AdamOptimizer = tf.keras.optimizers.Adam
 
-# 전역 상수 설정 (모든 프로세스가 공유)
-STATE_SIZE = 13
+# --- 전역 상수 설정 ---
+# 💡 TetrisEnv에서 상태 벡터가 1개 추가되었으므로 14로 설정
+STATE_SIZE = 14 
 ACTION_MAP = [(r, x) for r in range(4) for x in range(10)]
 ACTION_SIZE = len(ACTION_MAP)
 REPLAY_MEMORY_SIZE = 5000000
+# 💡 7800X3D 활용 (코어 수 - 1)
 N_WORKERS = cpu_count() - 1 
 
-# 💡 모델 저장 경로 상수 추가
+# 모델 저장 경로
 MODEL_SAVE_PATH = 'dqn_tetris_weights.weights.h5' 
 
 class DQNAgent:
-    """중앙 및 모니터링 에이전트로 사용되는 클래스"""
+    """중앙 및 모니터링 에이전트"""
     def __init__(self, state_size=STATE_SIZE, action_size=ACTION_SIZE):
         self.state_size = state_size
         self.action_size = action_size
@@ -33,7 +35,7 @@ class DQNAgent:
         self.update_target_model()
 
     def _build_model(self):
-        """신경망 모델 구축 (Keras 사용). CPU 장치를 명시적으로 지정합니다."""
+        """CPU에서 동작하는 신경망 구축"""
         with tf.device('/cpu:0'):
             model = tf.keras.Sequential([
                 tf.keras.layers.Dense(256, activation='relu', input_shape=(self.state_size,)),
@@ -44,34 +46,25 @@ class DQNAgent:
             return model
 
     def update_target_model(self):
-        """메인 모델의 가중치를 타겟 모델로 복사합니다."""
         self.target_model.set_weights(self.model.get_weights())
     
     def get_weights(self):
-        """Worker/Monitor에게 전달할 모델 가중치를 반환합니다."""
         return self.model.get_weights()
     
     def set_weights(self, weights):
-        """가중치를 받아 모델을 업데이트합니다."""
         self.model.set_weights(weights)
     
-    # 💡 가중치 저장 메서드 추가
     def save_weights(self, filename):
-        """모델 가중치를 파일로 저장합니다."""
-        # CPU 컨텍스트 내에서 저장하여 멀티프로세싱 환경에서 안정성 확보
         with tf.device('/cpu:0'):
             self.model.save_weights(filename)
 
-    # 💡 가중치 로드 메서드 추가
     def load_weights(self, filename):
-        """파일에서 모델 가중치를 로드합니다."""
         with tf.device('/cpu:0'):
             self.model.load_weights(filename)
-            self.update_target_model() # 타겟 모델도 함께 업데이트
+            self.update_target_model()
 
     def act(self, state, possible_actions, ACTION_MAP, epsilon=0.0):
-        """행동을 선택합니다."""
-        # 1. 탐험 
+        # 1. 탐험
         if np.random.rand() <= epsilon:
             random_action_tuple = random.choice(possible_actions)
             try:
@@ -80,24 +73,22 @@ class DQNAgent:
                 action_index = random.randrange(self.action_size)
             return action_index
         
-        # 2. 활용 (Exploitation): 최적 행동 선택
+        # 2. 활용
         with tf.device('/cpu:0'):
             state_tensor = tf.convert_to_tensor(state[np.newaxis, :], dtype=tf.float32)
             q_values_tensor = self.model(state_tensor, training=False)
             q_values = q_values_tensor.numpy()[0]
         
-        # 유효한 행동만 고려하여 Q 값 마스킹
         possible_indices = {ACTION_MAP.index(act) for act in possible_actions if act in ACTION_MAP}
         
         for i in range(self.action_size):
             if i not in possible_indices:
-                q_values[i] = -1e9  # 유효하지 않은 행동은 무시
+                q_values[i] = -1e9
                 
         action_index = np.argmax(q_values)
         return action_index
 
     def replay(self, memory_queue, batch_size):
-        """공유 메모리에서 미니배치를 샘플링하고 학습합니다."""
         if memory_queue.qsize() < batch_size:
             return
 
@@ -115,20 +106,14 @@ class DQNAgent:
         dones = np.array([e[4] for e in batch])
         
         with tf.device('/cpu:0'):
-        # 1. Main Model이 다음 상태에서 '최적의 행동'을 선택 (argmax)
+            # Double DQN Logic
             next_actions_indices = np.argmax(self.model(next_states, training=False).numpy(), axis=1)
-        
-        # 2. Target Model은 그 행동의 '가치(Q-value)'만 계산
             next_q_values_target = self.target_model(next_states, training=False).numpy()
-        
-        # 3. Double DQN 공식 적용: np.arange(batch_size) 대신 실제 샘플 크기를 사용
             max_next_q_values = next_q_values_target[np.arange(actual_batch_size), next_actions_indices]
         
             targets = rewards + self.gamma * max_next_q_values * (1 - dones.astype(int))
-        
             target_f = self.model(states, training=False).numpy() 
         
-        # 이 루프에서도 len(batch)를 사용하므로 수정 불필요
             for i in range(len(batch)):
                 target_f[i, action_indices[i]] = targets[i]
         
@@ -136,21 +121,18 @@ class DQNAgent:
 
 
 def worker_process(worker_id, memory_queue, shared_weights, epsilon_map, global_steps, lock):
-    """작업자 프로세스 (Worker Agent)"""
+    """학습 워커 프로세스"""
+    # 렌더링 없음 (None)
     env = TetrisEnv(render_mode='none') 
     local_agent = DQNAgent()
-    
-    # worker가 시작될 때 최초 1회 가중치 설정
     local_agent.set_weights(shared_weights) 
     
     print(f"Worker {worker_id} started. Initial Epsilon: {epsilon_map['epsilon']:.4f}")
     
-    episode_count = 0 # 💡 에피소드 카운터 초기화
-    SYNC_FREQ = 5     # 💡 가중치를 동기화할 빈도 설정 (예: 5판마다)
+    episode_count = 0 
+    SYNC_FREQ = 5 # 가중치 동기화 주기
     
     while True:
-        
-        # 💡 동기화 빈도 조절: 5판마다 중앙 가중치를 로컬 에이전트에 복사
         if episode_count % SYNC_FREQ == 0:
             local_agent.set_weights(shared_weights)
         
@@ -159,10 +141,8 @@ def worker_process(worker_id, memory_queue, shared_weights, epsilon_map, global_
         
         while not done:
             epsilon = epsilon_map['epsilon']
-            
             possible_actions = env.get_possible_actions()
             action_index = local_agent.act(state, possible_actions, ACTION_MAP, epsilon=epsilon)
-                
             action = ACTION_MAP[action_index]
             
             next_state, reward, done, _ = env.step(action)
@@ -174,27 +154,25 @@ def worker_process(worker_id, memory_queue, shared_weights, epsilon_map, global_
             
             state = next_state
         
-        # 에피소드 종료 후 처리
+        # [핵심 수정] Epsilon Decay 정책 변경 (매우 천천히 감소)
         with lock:
-            if epsilon_map['epsilon'] > 0.01:
-                epsilon_map['epsilon'] *= 0.995
+            if epsilon_map['epsilon'] > 0.05: # 최소 탐험 확률 5% 유지
+                epsilon_map['epsilon'] *= 0.99995 
         
-        episode_count += 1 # 💡 에피소드 카운트 증가
+        episode_count += 1 
 
 
 def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10, render_freq=5, worker_count=N_WORKERS):
     
-    # 1. 중앙 에이전트 및 공유 자원 설정
     global_agent = DQNAgent() 
     
-    # 💡 저장된 모델 가중치 로드
+    # 저장된 가중치 로드
     if os.path.exists(MODEL_SAVE_PATH):
         print(f"Loading previous weights from {MODEL_SAVE_PATH}...")
         try:
             global_agent.load_weights(MODEL_SAVE_PATH)
             print("Weights successfully loaded. Resuming training.")
         except Exception as e:
-            # 모델 구조가 변경되었거나 파일이 손상된 경우
             print(f"Error loading weights ({e}). Starting training from scratch.")
 
     manager = Manager()
@@ -205,16 +183,15 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
     global_steps = manager.dict({'value': 0})
     lock = manager.Lock()
 
-    # 2. 렌더링을 위한 별도 모니터링 에이전트 및 환경 생성
+    # 모니터링용 에이전트/환경
     monitor_agent = DQNAgent() 
     monitor_env = TetrisEnv(render_mode='human')
     monitor_state = monitor_env.reset()
     monitor_done = False
-    
     monitor_total_reward = 0.0
     monitor_step_count = 0
     
-    # 3. Worker 프로세스 생성 및 시작
+    # 워커 시작
     print(f"\n--- Starting Distributed Training with {worker_count} Workers (CPU Mode) ---")
     workers = []
     actual_worker_count = max(1, worker_count)
@@ -223,9 +200,8 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
         workers.append(p)
         p.start()
 
-    # 4. 중앙 학습 루프 (메인 프로세스)
+    # 메인 루프
     global_train_count = 0
-    total_steps = 0
     
     while global_train_count < episodes:
         
@@ -234,26 +210,24 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
             time.sleep(1)
             continue
             
-        # 4.1 모델 학습
         global_agent.replay(memory_queue, batch_size)
         global_train_count += 1
         
-        # 4.2 타겟 모델 업데이트
         if global_train_count % target_update_freq == 0:
             global_agent.update_target_model()
         
-        # 4.3 Worker들에게 업데이트된 가중치 동기화
+        # 가중치 공유
         if global_train_count % 1 == 0: 
              new_weights = global_agent.get_weights()
              for i, w in enumerate(new_weights):
                  shared_weights[i] = w
         
-        # 💡 4.4 주기적인 모델 저장 (1000 학습 스텝마다)
+        # 주기적 저장 (1000 스텝마다)
         if global_train_count % 1000 == 0 and global_train_count > 0:
             print(f"\n--- Saving model weights at Train Step {global_train_count} ---")
             global_agent.save_weights(MODEL_SAVE_PATH)
         
-        # 4.5 주기적인 렌더링 및 모니터링 (콘솔 출력용)
+        # 렌더링 및 모니터링
         if global_train_count % render_freq == 0: 
             monitor_agent.set_weights(global_agent.get_weights())
             
@@ -268,30 +242,25 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
             action = ACTION_MAP[action_index]
             
             monitor_state, reward, monitor_done, _ = monitor_env.step(action)
-            
             monitor_total_reward += reward
             monitor_step_count += 1
             
-            # TetrisEnv.py의 render 함수는 인수를 받지 않도록 수정되어야 합니다.
             monitor_env.render()
             
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    print("\nUser quit signal received. Terminating training and saving model...")
-                    # 💡 종료 시 최종 가중치 저장
+                    print("\nUser quit signal received. Saving and Exiting...")
                     global_agent.save_weights(MODEL_SAVE_PATH) 
                     monitor_env.close()
                     for p in workers: p.terminate(); p.join()
                     return
 
-        # 4.6 통계 출력 (콘솔)
-        total_steps = global_steps['value']
+        # 로그 출력
         if global_train_count % 10 == 0:
-            print(f"Train Step: {global_train_count}/{episodes}, Steps: {total_steps}, Epsilon: {epsilon_map['epsilon']:.4f} | Monitor -> Steps: {monitor_step_count}, Reward: {monitor_total_reward:.2f}")
+            print(f"Train Step: {global_train_count}/{episodes}, Global Steps: {global_steps['value']}, Epsilon: {epsilon_map['epsilon']:.4f} | Monitor Reward: {monitor_total_reward:.2f}")
 
-    # 5. 최종 종료
-    print("\n--- Distributed Training Finished. Finalizing and Saving Model Weights ---")
-    global_agent.save_weights(MODEL_SAVE_PATH) # 최종 가중치 저장
+    print("\n--- Distributed Training Finished. Saving Model Weights ---")
+    global_agent.save_weights(MODEL_SAVE_PATH)
     
     monitor_env.close()
     for p in workers:
