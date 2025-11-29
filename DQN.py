@@ -6,6 +6,7 @@ import pygame
 import os
 import time
 from multiprocessing import Process, Queue, Manager, cpu_count
+from TetrisEnv import TetrisEnv
 
 AdamOptimizer = tf.keras.optimizers.Adam
 
@@ -13,7 +14,7 @@ AdamOptimizer = tf.keras.optimizers.Adam
 STATE_SIZE = 13
 ACTION_MAP = [(r, x) for r in range(4) for x in range(10)]
 ACTION_SIZE = len(ACTION_MAP)
-REPLAY_MEMORY_SIZE = 20000 
+REPLAY_MEMORY_SIZE = 5000000
 N_WORKERS = cpu_count() - 1 
 
 # 💡 모델 저장 경로 상수 추가
@@ -24,7 +25,7 @@ class DQNAgent:
     def __init__(self, state_size=STATE_SIZE, action_size=ACTION_SIZE):
         self.state_size = state_size
         self.action_size = action_size
-        self.gamma = 0.95
+        self.gamma = 0.99
         self.learning_rate = 0.001
         
         self.model = self._build_model()
@@ -35,8 +36,8 @@ class DQNAgent:
         """신경망 모델 구축 (Keras 사용). CPU 장치를 명시적으로 지정합니다."""
         with tf.device('/cpu:0'):
             model = tf.keras.Sequential([
-                tf.keras.layers.Dense(64, activation='relu', input_shape=(self.state_size,)),
-                tf.keras.layers.Dense(64, activation='relu'),
+                tf.keras.layers.Dense(256, activation='relu', input_shape=(self.state_size,)),
+                tf.keras.layers.Dense(256, activation='relu'),
                 tf.keras.layers.Dense(self.action_size, activation='linear')
             ])
             model.compile(loss='mse', optimizer=AdamOptimizer(learning_rate=self.learning_rate))
@@ -105,6 +106,7 @@ class DQNAgent:
             batch.append(memory_queue.get())
             
         if not batch: return
+        actual_batch_size = len(batch)
 
         states = np.array([e[0] for e in batch])
         action_indices = np.array([e[1] for e in batch])
@@ -113,14 +115,23 @@ class DQNAgent:
         dones = np.array([e[4] for e in batch])
         
         with tf.device('/cpu:0'):
-            next_q_values = self.target_model(next_states, training=False).numpy()
-            targets = rewards + self.gamma * np.amax(next_q_values, axis=1) * (1 - dones.astype(int))
-            
+        # 1. Main Model이 다음 상태에서 '최적의 행동'을 선택 (argmax)
+            next_actions_indices = np.argmax(self.model(next_states, training=False).numpy(), axis=1)
+        
+        # 2. Target Model은 그 행동의 '가치(Q-value)'만 계산
+            next_q_values_target = self.target_model(next_states, training=False).numpy()
+        
+        # 3. Double DQN 공식 적용: np.arange(batch_size) 대신 실제 샘플 크기를 사용
+            max_next_q_values = next_q_values_target[np.arange(actual_batch_size), next_actions_indices]
+        
+            targets = rewards + self.gamma * max_next_q_values * (1 - dones.astype(int))
+        
             target_f = self.model(states, training=False).numpy() 
-            
+        
+        # 이 루프에서도 len(batch)를 사용하므로 수정 불필요
             for i in range(len(batch)):
                 target_f[i, action_indices[i]] = targets[i]
-            
+        
             self.model.train_on_batch(states, target_f)
 
 
@@ -129,12 +140,19 @@ def worker_process(worker_id, memory_queue, shared_weights, epsilon_map, global_
     env = TetrisEnv(render_mode='none') 
     local_agent = DQNAgent()
     
-    local_agent.set_weights(shared_weights)
+    # worker가 시작될 때 최초 1회 가중치 설정
+    local_agent.set_weights(shared_weights) 
     
     print(f"Worker {worker_id} started. Initial Epsilon: {epsilon_map['epsilon']:.4f}")
     
+    episode_count = 0 # 💡 에피소드 카운터 초기화
+    SYNC_FREQ = 5     # 💡 가중치를 동기화할 빈도 설정 (예: 5판마다)
+    
     while True:
-        local_agent.set_weights(shared_weights)
+        
+        # 💡 동기화 빈도 조절: 5판마다 중앙 가중치를 로컬 에이전트에 복사
+        if episode_count % SYNC_FREQ == 0:
+            local_agent.set_weights(shared_weights)
         
         state = env.reset()
         done = False
@@ -156,9 +174,12 @@ def worker_process(worker_id, memory_queue, shared_weights, epsilon_map, global_
             
             state = next_state
         
+        # 에피소드 종료 후 처리
         with lock:
             if epsilon_map['epsilon'] > 0.01:
                 epsilon_map['epsilon'] *= 0.995
+        
+        episode_count += 1 # 💡 에피소드 카운트 증가
 
 
 def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10, render_freq=5, worker_count=N_WORKERS):

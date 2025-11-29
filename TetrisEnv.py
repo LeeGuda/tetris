@@ -82,7 +82,7 @@ class TetrisEnv:
             self.clock = pygame.time.Clock()
 
     def get_state(self):
-        # ... (기존 get_state 로직 유지) ...
+        # 1. 각 열의 높이(Heights) 계산
         heights = np.zeros(self.BOARD_WIDTH, dtype=int)
         for x in range(self.BOARD_WIDTH):
             for y in range(self.BOARD_HEIGHT):
@@ -90,6 +90,7 @@ class TetrisEnv:
                     heights[x] = self.BOARD_HEIGHT - y 
                     break
         
+        # 2. 구멍(Holes) 개수 계산
         holes = 0
         for x in range(self.BOARD_WIDTH):
             found_block = False
@@ -99,13 +100,29 @@ class TetrisEnv:
                 elif found_block and self.game_board[y][x] == 0:
                     holes += 1
 
+        # 3. 거칠기(Bumpiness) 및 최대 높이 계산
         bumpiness = np.sum(np.abs(heights[:-1] - heights[1:]))
         max_height = np.max(heights) if heights.size > 0 else 0
-        # 상태 벡터 순서: [MaxHeight, Holes, Bumpiness, Col_0_Height, ...]
-        state_features = np.array([max_height, holes, bumpiness] + heights.tolist())
+
+        # --- 💡 [수정된 부분] 데이터 정규화 (Normalization) ---
+        # 신경망은 입력값이 0.0 ~ 1.0 사이일 때 학습 효율이 가장 좋습니다.
+        
+        # 높이는 전체 높이(20)로 나눕니다.
+        norm_max_height = max_height / self.BOARD_HEIGHT
+        norm_heights = heights / self.BOARD_HEIGHT
+        
+        # 구멍 개수는 이론적 최대치(약 100개 정도로 가정)로 나누어 0~1 사이로 맞춥니다.
+        norm_holes = holes / (self.BOARD_WIDTH * self.BOARD_HEIGHT / 2) 
+        
+        # 거칠기는 이론적 최대치(약 180~200)로 나누어 줍니다.
+        norm_bumpiness = bumpiness / (self.BOARD_HEIGHT * self.BOARD_WIDTH)
+
+        # 4. 정규화된 상태 벡터 반환
+        # 순서: [MaxHeight, Holes, Bumpiness, Col_0_Height, ... Col_9_Height]
+        state_features = np.array([norm_max_height, norm_holes, norm_bumpiness] + norm_heights.tolist())
         
         return state_features
-        
+    
     def reset(self):
         self.game_board = np.zeros((self.BOARD_HEIGHT, self.BOARD_WIDTH), dtype=int)
         self.next_blocks = [generate_random_block_index() for _ in range(5)]
@@ -194,7 +211,7 @@ class TetrisEnv:
     
         # --- 페널티 계수 설정 (조정) ---
         # MaxHeight 페널티를 강화하여 높이 상승을 강력히 억제합니다.
-        ALPHA = 1.0   # MaxHeight 계수 (0.5 -> 1.0으로 강화)
+        ALPHA = 0.8   # MaxHeight 계수 
         BETA = 0.5    # Holes 계수
         GAMMA = 0.2  # Bumpiness 계수
         TIME_PENALTY = 0.02 # 시간 페널티 (0.01 -> 0.02로 약간 강화)
