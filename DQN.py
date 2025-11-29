@@ -16,7 +16,7 @@ AdamOptimizer = tf.keras.optimizers.Adam
 STATE_SIZE = 14 
 ACTION_MAP = [(r, x) for r in range(4) for x in range(10)]
 ACTION_SIZE = len(ACTION_MAP)
-REPLAY_MEMORY_SIZE = 5000000
+REPLAY_MEMORY_SIZE = 500000
 N_WORKERS = cpu_count() - 1 
 
 # 모델 저장 경로
