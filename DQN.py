@@ -205,7 +205,7 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
     memory_queue = manager.Queue()
     
     shared_weights = manager.list(global_agent.get_weights())
-    epsilon_map = manager.dict({'epsilon': 1.0})
+    epsilon_map = manager.dict({'epsilon': 0.3}) # Epsilon 재설정 값 유지
     global_steps = manager.dict({'value': 0})
     lock = manager.Lock()
 
@@ -251,13 +251,11 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
              for i, w in enumerate(new_weights):
                  shared_weights[i] = w
         
-        # [수정] 주기적 저장 (1000 스텝마다) - 푸시 기능은 삭제됨
+        # [수정] 주기적 저장 (1000 스텝마다) - 가중치만 저장
         if global_train_count % 1000 == 0 and global_train_count > 0:
-            print(f"\n--- Saving model/memory weights at Train Step {global_train_count} ---")
+            print(f"\n--- Saving model weights at Train Step {global_train_count} ---")
             global_agent.save_weights(MODEL_SAVE_PATH)
-            memory.save_memory(MEMORY_SAVE_PATH) 
-            
-            # Git 푸시 스레드 시작 코드가 삭제되었습니다.
+            # memory.save_memory(MEMORY_SAVE_PATH) <-- 메모리 저장 코드 제거
             
         # 렌더링 및 모니터링
         if global_train_count % render_freq == 0: 
@@ -283,9 +281,8 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
                 if event.type == pygame.QUIT:
                     print("\nUser quit signal received. Saving and Exiting...")
                     global_agent.save_weights(MODEL_SAVE_PATH) 
-                    memory.save_memory(MEMORY_SAVE_PATH) 
+                    memory.save_memory(MEMORY_SAVE_PATH) # <-- 종료 시 메모리 저장 유지
                     
-                    # [추가] 종료 시 Git 푸시
                     git_push_thread(global_train_count)
                     
                     monitor_env.close()
@@ -297,9 +294,8 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
 
     print("\n--- Distributed Training Finished. Saving Model Weights ---")
     global_agent.save_weights(MODEL_SAVE_PATH)
-    memory.save_memory(MEMORY_SAVE_PATH)
+    memory.save_memory(MEMORY_SAVE_PATH) # <-- 최종 메모리 저장 유지
     
-    # [추가] 최종 푸시
     git_push_thread(global_train_count)
     
     monitor_env.close()
