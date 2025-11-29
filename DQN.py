@@ -5,10 +5,11 @@ import random
 import pygame
 import os
 import time
-import subprocess # [추가] 깃 명령어를 쓰기 위해 필요
-import threading  # [추가] 학습이 멈추지 않게 백그라운드에서 푸시하기 위해 필요
-from multiprocessing import Process, Queue, Manager, cpu_count
+import subprocess
+import threading
+from multiprocessing import Process, Manager, Lock, cpu_count
 from TetrisEnv import TetrisEnv
+from PrioritizedReplayMemory import PrioritizedReplayMemory
 
 AdamOptimizer = tf.keras.optimizers.Adam
 
@@ -16,22 +17,28 @@ AdamOptimizer = tf.keras.optimizers.Adam
 STATE_SIZE = 14 
 ACTION_MAP = [(r, x) for r in range(4) for x in range(10)]
 ACTION_SIZE = len(ACTION_MAP)
-REPLAY_MEMORY_SIZE = 500000
+
+# [수정된 값 유지] 용량 목표: 약 50MB 목표 (40만~50만 개)
+REPLAY_MEMORY_SIZE = 400000 
+
+# 고사양/멀티프로세싱 최적화
 N_WORKERS = cpu_count() - 1 
 
-# 모델 저장 경로
+# 모델 및 메모리 저장 경로
 MODEL_SAVE_PATH = 'dqn_tetris_weights.weights.h5' 
+MEMORY_SAVE_PATH = 'prioritized_replay_memory.pkl' # 메모리 저장 파일 경로
 
-# [추가] 깃허브 푸시 함수 (별도 스레드에서 실행됨)
-def git_push_thread(filename, step):
+# [수정됨] 깃허브 푸시 함수 (두 파일 모두 처리)
+def git_push_thread(step):
     try:
-        print(f"\n[Git] Uploading {filename} to GitHub...")
+        print(f"\n[Git] Uploading files to GitHub...")
         
-        # 1. git add
-        subprocess.run(["git", "add", filename], check=True, capture_output=True)
+        # 1. git add: 모델 파일과 메모리 파일 모두 추가
+        subprocess.run(["git", "add", MODEL_SAVE_PATH], check=True, capture_output=True)
+        subprocess.run(["git", "add", MEMORY_SAVE_PATH], check=True, capture_output=True) # <-- 추가
         
         # 2. git commit
-        commit_message = f"Auto-save: Model weights at step {step}"
+        commit_message = f"Auto-save: Weights & PER Memory at step {step}"
         subprocess.run(["git", "commit", "-m", commit_message], check=True, capture_output=True)
         
         # 3. git push
@@ -39,8 +46,7 @@ def git_push_thread(filename, step):
         
         print(f"[Git] Successfully pushed to GitHub at step {step}!")
     except subprocess.CalledProcessError as e:
-        # 변경사항이 없거나(이미 커밋됨) 네트워크 오류 등
-        print(f"[Git] Push skipped or failed: {e}")
+        print(f"[Git] Push skipped or failed: {e.output.decode()}")
 
 class DQNAgent:
     """중앙 및 모니터링 에이전트"""
@@ -108,40 +114,40 @@ class DQNAgent:
         action_index = np.argmax(q_values)
         return action_index
 
-    def replay(self, memory_queue, batch_size):
-        if memory_queue.qsize() < batch_size:
+    def replay(self, memory, batch_size): 
+        if memory.size() < batch_size * 4:
             return
 
-        batch = []
-        while not memory_queue.empty() and len(batch) < batch_size:
-            batch.append(memory_queue.get())
-            
-        if not batch: return
-        actual_batch_size = len(batch)
-
-        states = np.array([e[0] for e in batch])
-        action_indices = np.array([e[1] for e in batch])
-        rewards = np.array([e[2] for e in batch])
-        next_states = np.array([e[3] for e in batch])
-        dones = np.array([e[4] for e in batch])
+        states, action_indices, rewards, next_states, dones, indices, is_weights = memory.sample(batch_size)
         
         with tf.device('/cpu:0'):
             # Double DQN Logic
             next_actions_indices = np.argmax(self.model(next_states, training=False).numpy(), axis=1)
             next_q_values_target = self.target_model(next_states, training=False).numpy()
-            max_next_q_values = next_q_values_target[np.arange(actual_batch_size), next_actions_indices]
+            max_next_q_values = next_q_values_target[np.arange(batch_size), next_actions_indices]
         
             targets = rewards + self.gamma * max_next_q_values * (1 - dones.astype(int))
             target_f = self.model(states, training=False).numpy() 
+            
+            # 예측 Q 값과 목표 Q 값의 차이 (TD 오차) 계산
+            td_errors = targets - target_f[np.arange(batch_size), action_indices]
+            
+            # PER: TD 오차를 사용하여 우선순위 업데이트
+            memory.update_priorities(indices, td_errors)
         
-            for i in range(len(batch)):
+            # 모델 업데이트
+            for i in range(batch_size):
                 target_f[i, action_indices[i]] = targets[i]
-        
-            self.model.train_on_batch(states, target_f)
+            
+            # PER: Importance Sampling Weight를 반영하여 손실을 계산
+            is_weights = is_weights.reshape(batch_size,) 
+            
+            # train_on_batch 사용
+            self.model.train_on_batch(states, target_f, sample_weight=is_weights)
 
 
 def worker_process(worker_id, memory_queue, shared_weights, epsilon_map, global_steps, lock):
-    """학습 워커 프로세스"""
+    """학습 워커 프로세스 (경험 수집 역할)"""
     env = TetrisEnv(render_mode='none') 
     local_agent = DQNAgent()
     local_agent.set_weights(shared_weights) 
@@ -166,6 +172,7 @@ def worker_process(worker_id, memory_queue, shared_weights, epsilon_map, global_
             
             next_state, reward, done, _ = env.step(action)
             
+            # 워커는 경험과 초기 높은 우선순위를 메인 프로세스로 전달
             memory_queue.put((state, action_index, reward, next_state, done))
             
             with lock:
@@ -184,6 +191,7 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
     
     global_agent = DQNAgent() 
     
+    # 1. 가중치 로드
     if os.path.exists(MODEL_SAVE_PATH):
         print(f"Loading previous weights from {MODEL_SAVE_PATH}...")
         try:
@@ -192,8 +200,12 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
         except Exception as e:
             print(f"Error loading weights ({e}). Starting training from scratch.")
 
+    # 2. PER 메모리 및 매니저 초기화
+    memory = PrioritizedReplayMemory(REPLAY_MEMORY_SIZE, STATE_SIZE)
+    memory.load_memory(MEMORY_SAVE_PATH)
+    
     manager = Manager()
-    memory_queue = Queue(maxsize=REPLAY_MEMORY_SIZE) 
+    memory_queue = manager.Queue()
     
     shared_weights = manager.list(global_agent.get_weights())
     epsilon_map = manager.dict({'epsilon': 1.0})
@@ -207,6 +219,7 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
     monitor_total_reward = 0.0
     monitor_step_count = 0
     
+    # 워커 시작
     print(f"\n--- Starting Distributed Training with {worker_count} Workers (CPU Mode) ---")
     workers = []
     actual_worker_count = max(1, worker_count)
@@ -215,16 +228,22 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
         workers.append(p)
         p.start()
 
+    # 메인 루프
     global_train_count = 0
     
     while global_train_count < episodes:
         
-        if memory_queue.qsize() < batch_size * 4: 
-            print(f"Waiting for experience... Current size: {memory_queue.qsize()}", end='\r')
+        # 큐에 쌓인 데이터를 PER 메모리에 저장
+        while not memory_queue.empty():
+            experience = memory_queue.get()
+            memory.store(experience, memory.max_priority if memory.size() > 0 else 1.0) 
+            
+        if memory.size() < batch_size * 4: 
+            print(f"Waiting for experience... Current size: {memory.size()}", end='\r')
             time.sleep(1)
             continue
             
-        global_agent.replay(memory_queue, batch_size)
+        global_agent.replay(memory, batch_size)
         global_train_count += 1
         
         if global_train_count % target_update_freq == 0:
@@ -237,18 +256,18 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
         
         # 주기적 저장 및 GitHub 푸시 (1000 스텝마다)
         if global_train_count % 1000 == 0 and global_train_count > 0:
-            print(f"\n--- Saving model weights at Train Step {global_train_count} ---")
+            print(f"\n--- Saving model/memory weights at Train Step {global_train_count} ---")
             global_agent.save_weights(MODEL_SAVE_PATH)
+            memory.save_memory(MEMORY_SAVE_PATH) 
             
-            # [추가] 깃허브 푸시를 스레드로 실행 (학습 안 멈추게)
-            # 주의: 너무 자주 푸시하면 깃 히스토리가 지저분해지므로 1000~5000 스텝 권장
+            # [수정] Git 푸시 (인자 수정)
             push_thread = threading.Thread(
                 target=git_push_thread, 
-                args=(MODEL_SAVE_PATH, global_train_count)
+                args=(global_train_count,)
             )
             push_thread.start()
-        
-        # 렌더링 및 모니터링
+            
+        # 렌더링 및 모니터링 (이전과 동일)
         if global_train_count % render_freq == 0: 
             monitor_agent.set_weights(global_agent.get_weights())
             
@@ -272,9 +291,10 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
                 if event.type == pygame.QUIT:
                     print("\nUser quit signal received. Saving and Exiting...")
                     global_agent.save_weights(MODEL_SAVE_PATH) 
+                    memory.save_memory(MEMORY_SAVE_PATH) 
                     
-                    # 종료 시 마지막 푸시 시도
-                    git_push_thread(MODEL_SAVE_PATH, global_train_count)
+                    # [수정] 종료 시 마지막 푸시 시도
+                    git_push_thread(global_train_count)
                     
                     monitor_env.close()
                     for p in workers: p.terminate(); p.join()
@@ -285,9 +305,10 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
 
     print("\n--- Distributed Training Finished. Saving Model Weights ---")
     global_agent.save_weights(MODEL_SAVE_PATH)
+    memory.save_memory(MEMORY_SAVE_PATH)
     
-    # 완료 시 마지막 푸시
-    git_push_thread(MODEL_SAVE_PATH, global_train_count)
+    # [수정] 최종 푸시
+    git_push_thread(global_train_count)
     
     monitor_env.close()
     for p in workers:
