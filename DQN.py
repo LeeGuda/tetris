@@ -18,24 +18,21 @@ STATE_SIZE = 14
 ACTION_MAP = [(r, x) for r in range(4) for x in range(10)]
 ACTION_SIZE = len(ACTION_MAP)
 
-# [수정된 값 유지] 용량 목표: 약 50MB 목표 (40만~50만 개)
 REPLAY_MEMORY_SIZE = 400000 
-
-# 고사양/멀티프로세싱 최적화
 N_WORKERS = cpu_count() - 1 
 
 # 모델 및 메모리 저장 경로
 MODEL_SAVE_PATH = 'dqn_tetris_weights.weights.h5' 
-MEMORY_SAVE_PATH = 'prioritized_replay_memory.pkl' # 메모리 저장 파일 경로
+MEMORY_SAVE_PATH = 'prioritized_replay_memory.pkl' 
 
-# [수정됨] 깃허브 푸시 함수 (두 파일 모두 처리)
+# 깃허브 푸시 함수 (두 파일 모두 처리)
 def git_push_thread(step):
     try:
         print(f"\n[Git] Uploading files to GitHub...")
         
         # 1. git add: 모델 파일과 메모리 파일 모두 추가
         subprocess.run(["git", "add", MODEL_SAVE_PATH], check=True, capture_output=True)
-        subprocess.run(["git", "add", MEMORY_SAVE_PATH], check=True, capture_output=True) # <-- 추가
+        subprocess.run(["git", "add", MEMORY_SAVE_PATH], check=True, capture_output=True) 
         
         # 2. git commit
         commit_message = f"Auto-save: Weights & PER Memory at step {step}"
@@ -254,20 +251,15 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
              for i, w in enumerate(new_weights):
                  shared_weights[i] = w
         
-        # 주기적 저장 및 GitHub 푸시 (1000 스텝마다)
+        # [수정] 주기적 저장 (1000 스텝마다) - 푸시 기능은 삭제됨
         if global_train_count % 1000 == 0 and global_train_count > 0:
             print(f"\n--- Saving model/memory weights at Train Step {global_train_count} ---")
             global_agent.save_weights(MODEL_SAVE_PATH)
             memory.save_memory(MEMORY_SAVE_PATH) 
             
-            # [수정] Git 푸시 (인자 수정)
-            push_thread = threading.Thread(
-                target=git_push_thread, 
-                args=(global_train_count,)
-            )
-            push_thread.start()
+            # Git 푸시 스레드 시작 코드가 삭제되었습니다.
             
-        # 렌더링 및 모니터링 (이전과 동일)
+        # 렌더링 및 모니터링
         if global_train_count % render_freq == 0: 
             monitor_agent.set_weights(global_agent.get_weights())
             
@@ -293,7 +285,7 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
                     global_agent.save_weights(MODEL_SAVE_PATH) 
                     memory.save_memory(MEMORY_SAVE_PATH) 
                     
-                    # [수정] 종료 시 마지막 푸시 시도
+                    # [추가] 종료 시 Git 푸시
                     git_push_thread(global_train_count)
                     
                     monitor_env.close()
@@ -307,7 +299,7 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
     global_agent.save_weights(MODEL_SAVE_PATH)
     memory.save_memory(MEMORY_SAVE_PATH)
     
-    # [수정] 최종 푸시
+    # [추가] 최종 푸시
     git_push_thread(global_train_count)
     
     monitor_env.close()
