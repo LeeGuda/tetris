@@ -193,10 +193,10 @@ class TetrisEnv:
         diff_aggregate = current_state[3] - prev_state[3] # Aggregate Height 변화
 
         # 3. 가중치 설정 (정규화된 값이므로 가중치를 크게 설정)
-        W_HEIGHT = -15.0      # 높이 증가 억제
-        W_HOLES = -60.0       # 구멍 생성 강력 억제 (가장 중요)
-        W_BUMPINESS = -5.0    # 평평하게 유지
-        W_AGGREGATE = -2.0    # 전체 블록 높이 억제
+        W_HEIGHT = -5.0      # 높이 증가 억제
+        W_HOLES = -6.0       # 구멍 생성 강력 억제 (가장 중요)
+        W_BUMPINESS = -2.0    # 평평하게 유지
+        W_AGGREGATE = -1.0    # 전체 블록 높이 억제
         
         # 4. 최종 보상 합산
         reward = reward_lines \
