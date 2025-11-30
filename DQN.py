@@ -184,7 +184,7 @@ def worker_process(worker_id, memory_queue, shared_weights, epsilon_map, global_
         episode_count += 1 
 
 
-def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10, render_freq=5, worker_count=N_WORKERS):
+def distributed_train_dqn(episodes=100000000, batch_size=128, target_update_freq=10, render_freq=5, worker_count=N_WORKERS):
     
     global_agent = DQNAgent() 
     
@@ -255,7 +255,7 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
         if global_train_count % 1000 == 0 and global_train_count > 0:
             print(f"\n--- Saving model weights at Train Step {global_train_count} ---")
             global_agent.save_weights(MODEL_SAVE_PATH)
-            # memory.save_memory(MEMORY_SAVE_PATH) <-- 메모리 저장 코드 제거
+            memory.save_memory(MEMORY_SAVE_PATH) 
             
         # 렌더링 및 모니터링
         if global_train_count % render_freq == 0: 
@@ -307,4 +307,4 @@ def distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10,
 
 if __name__ == '__main__':
     pygame.init() 
-    distributed_train_dqn(episodes=50000, batch_size=128, target_update_freq=10, render_freq=5, worker_count=N_WORKERS)
+    distributed_train_dqn(episodes=100000000, batch_size=128, target_update_freq=10, render_freq=5, worker_count=N_WORKERS)
